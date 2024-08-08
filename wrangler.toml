@@ -1,0 +1,26 @@
+name = "flickr-showcase"
+type = "javascript"
+account_id = "<YOUR_ACCOUNT_ID>"
+workers_dev = true
+compatibility_date = "2023-05-22"
+
+[vars]
+CACHE_NAME = "flickr-images-cache-v1"
+CACHE_EXPIRATION = "86400"
+NUM_IMAGES = "6"
+REDIRECT_DOMAIN = "<REDIRECT_DOMAIN>"
+FLICKR_PHOTOSET_ID = "<YOUR_FLICKR_PHOTOSET_ID>"
+
+[secrets]
+FLICKR_API_KEY = "<YOUR_FLICKR_API_KEY>"
+
+[build]
+command = "wrangler publish"
+
+[build.upload]
+format = "service-worker"
+
+[dev]
+ip = "0.0.0.0"
+port = 8787
+local_protocol = "http"

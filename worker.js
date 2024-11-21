@@ -10,116 +10,94 @@ addEventListener('fetch', event => {
 })
 
 async function handleRequest(request) {
-  const url = new URL(request.url);
-  const pathname = url.pathname;
-
-  console.debug("Handling request for pathname:", pathname);
-
-  // Check if the request matches the pattern for an image (/1.jpg, /2.jpg, etc.)
-  const imageMatch = /^\/(\d+)\.jpg$/.exec(pathname);
+  const url = new URL(request.url)
+  const imageMatch = /^\/(\d+)\.jpg$/.exec(url.pathname)
+  
+  // Validate image number early to avoid unnecessary cache operations
   if (imageMatch) {
-    const imageNumber = parseInt(imageMatch[1]);
-    console.debug("Image number:", imageNumber);
-
+    const imageNumber = parseInt(imageMatch[1])
     if (imageNumber <= 0 || imageNumber > NUM_IMAGES) {
-      console.debug("Image number out of range, returning 404");
-      return new Response('Image not found', { status: 404 });
-    }
-
-    console.debug("Valid image number, proceeding with cache check");
-    const cache = await caches.open(CACHE_NAME);
-    let cachedResponse = await cache.match(request);
-
-    // Trigger caching if the requested image is not cached already
-    if (!cachedResponse) {
-      console.debug("No cached response found for URL:", url.toString());
-      await cacheRandomImages(request);
-      // Try to get the cached response again after caching
-      cachedResponse = await cache.match(request);
-    }
-
-    // If the cached response is found, return it
-    if (cachedResponse) {
-      console.debug("Returning cached response for URL:", url.toString());
-      return cachedResponse;
-    } else {
-      console.debug("No cached response found after caching, returning 404");
-      return new Response('Image not found', { status: 404 });
+      return new Response('Image not found', { 
+        status: 404,
+        headers: { 'Content-Type': 'text/plain' }
+      })
     }
   }
 
-  // Route for manually updating cache
-  if (pathname === '/update-cache') {
-    console.debug("Updating cache via /update-cache route");
-    await cacheRandomImages(request);
-    return new Response('Cache updated successfully', { status: 200 });
+  const cache = await caches.open(CACHE_NAME)
+  
+  if (imageMatch) {
+    return handleImageRequest(cache, request)
+  }
+  
+  if (url.pathname === '/update-cache') {
+    await cacheRandomImages(cache, request)
+    return new Response('Cache updated', { 
+      status: 200,
+      headers: { 'Content-Type': 'text/plain' }
+    })
+  }
+  
+  return Response.redirect(REDIRECT_DOMAIN, 302)
+}
+
+async function handleImageRequest(cache, request) {
+  const response = await cache.match(request)
+  
+  if (response) {
+    return response
   }
 
-  // Redirect any other request to the specified domain
-  console.debug("No matching route found, redirecting to:", REDIRECT_DOMAIN);
-  return Response.redirect(REDIRECT_DOMAIN, 302);
+  await cacheRandomImages(cache, request)
+  const cachedResponse = await cache.match(request)
+  
+  return cachedResponse || new Response('Image not found', { 
+    status: 404,
+    headers: { 'Content-Type': 'text/plain' }
+  })
 }
 
 async function fetchPhotosFromFlickr() {
-  const apiKey = FLICKR_API_KEY; 
-  const photoSetId = FLICKR_PHOTOSET_ID;
-  const apiUrl = `https://api.flickr.com/services/rest/?method=flickr.photosets.getPhotos&api_key=${apiKey}&photoset_id=${photoSetId}&format=json&nojsoncallback=1&extras=url_l`;
-
+  const params = new URLSearchParams({
+    method: 'flickr.photosets.getPhotos',
+    api_key: FLICKR_API_KEY,
+    photoset_id: FLICKR_PHOTOSET_ID,
+    format: 'json',
+    nojsoncallback: '1',
+    extras: 'url_l'
+  })
+  
   try {
-    const response = await fetch(apiUrl);
-    const data = await response.json();
-
-    // If the Flickr API response is successful, return the photos
-    if (data.stat === 'ok') {
-      return data.photoset.photo;
-    } else {
-      console.error("Flickr API returned an error:", data);
-      return [];
-    }
-  } catch (error) {
-    console.error('Error fetching from Flickr API:', error);
-    return [];
+    const response = await fetch(`https://api.flickr.com/services/rest/?${params}`)
+    const data = await response.json()
+    return data.stat === 'ok' ? data.photoset.photo : []
+  } catch {
+    return []
   }
 }
 
-async function cacheRandomImages(originalRequest) {
-  console.debug("Caching random images from Flickr API");
-  const photos = await fetchPhotosFromFlickr();
-  const randomPhotos = getRandomPhotos(photos, NUM_IMAGES);
-
-  const cache = await caches.open(CACHE_NAME);
-
-  const cachePromises = randomPhotos.map(async (photo, i) => {
-    if (photo && photo.url_l) {
-      const imageName = `${i + 1}.jpg`;
-      const imageUrl = photo.url_l;
-      const imageRequest = new Request(`${new URL(originalRequest.url).origin}/${imageName}`);
-      const imageResponse = await fetch(imageUrl);
-
-      // Set cache headers on the response before caching
+async function cacheRandomImages(cache, originalRequest) {
+  const photos = await fetchPhotosFromFlickr()
+  const baseUrl = new URL(originalRequest.url).origin
+  const randomPhotos = photos
+    .sort(() => Math.random() - 0.5)
+    .slice(0, NUM_IMAGES)
+    .filter(photo => photo?.url_l)
+  
+  await Promise.all(
+    randomPhotos.map(async (photo, i) => {
+      const imageRequest = new Request(`${baseUrl}/${i + 1}.jpg`)
+      const imageResponse = await fetch(photo.url_l)
+      
       const cachedResponse = new Response(imageResponse.body, {
         headers: {
-          'Cache-Control': `max-age=${CACHE_EXPIRATION}`,
           ...imageResponse.headers,
-        },
-      });
-
-      await cache.put(imageRequest, cachedResponse);
-      console.debug(`Cached ${imageName}:`, {
-        requestUrl: imageRequest.url,
-        status: cachedResponse.status,
-        statusText: cachedResponse.statusText,
-        flickrUrl: imageUrl
-      });
-    } else {
-      console.warn(`Skipping photo ${i + 1} due to missing url_l property`);
-    }
-  });
-
-  await Promise.all(cachePromises);
-}
-
-function getRandomPhotos(photos, count) {
-  const shuffled = photos.sort(() => 0.5 - Math.random());
-  return shuffled.slice(0, count);
+          'Cache-Control': `public, max-age=${CACHE_EXPIRATION}`,
+          'Content-Type': 'image/jpeg'
+        }
+      })
+      
+      await cache.put(imageRequest, cachedResponse)
+    })
+  )
 }

@@ -23,8 +23,9 @@ This Cloudflare Worker regularly fetches random images from a Flickr photoset, c
 Once deployed, the Worker will be available at a URL like `https://flickr-showcase.<your-subdomain>.workers.dev`.
 
 - To view a cached image, visit `/1.jpg`, `/2.jpg`, etc.
-- To manually update the cache with new random images, visit `/update-cache`.
 - Any other URL will redirect to the configured `REDIRECT_DOMAIN`.
+- Cache failures will redirect to the flickr url without caching.
+- Any other failures will redirect to the `REDIRECT_DOMAIN/*.jpg` with the user provided image number.
 
 ## Development
 

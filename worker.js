@@ -1,108 +1,167 @@
-// const CACHE_NAME = 'flickr-images-cache-v1'; // Name of the cache storage
-// const CACHE_EXPIRATION = 86400; // Cache expiration time in seconds (24 hours)
-// const NUM_IMAGES = 6; // Number of images to cache and serve
-// const REDIRECT_DOMAIN = 'https://example.com'; // Domain to redirect unmatched requests to
-// const FLICKR_API_KEY = 'YOUR_API_KEY'; // Flickr API key (replace with your own)
-// const FLICKR_PHOTOSET_ID = 'YOUR_PHOTOSET_ID'; // Flickr photoset ID (replace with your own)
+// const CACHE_NAME = 'flickr-images-cache-v1';
+// const CACHE_EXPIRATION = 86400;
+// const NUM_IMAGES = 6;
+// const REDIRECT_DOMAIN = 'https://example.com';
+// const FLICKR_API_KEY = 'YOUR_API_KEY';
+// const FLICKR_PHOTOSET_ID = 'YOUR_PHOTOSET_ID';
 
-addEventListener("fetch", (event) => {
-  event.respondWith(handleRequest(event.request));
-});
-
-async function handleRequest(request) {
-  const url = new URL(request.url);
+addEventListener('fetch', event => {
+  const url = new URL(event.request.url);
   const imageMatch = /^\/(\d+)\.jpg$/.exec(url.pathname);
 
-  // Validate image number early to avoid unnecessary cache operations
-  if (imageMatch) {
-    const imageNumber = parseInt(imageMatch[1]);
-    if (imageNumber <= 0 || imageNumber > NUM_IMAGES) {
-      return new Response("Image not found", {
-        status: 404,
-        headers: { "Content-Type": "text/plain" },
-      });
-    }
+  if (url.pathname === '/photos.json') {
+    event.respondWith(handleJSONRequest(event.request));
+  } else if (imageMatch) {
+    event.respondWith(handleRequest(event.request, parseInt(imageMatch[1])));
+  } else {
+    console.debug('No matching route, redirecting to:', REDIRECT_DOMAIN);
+    event.respondWith(Response.redirect(REDIRECT_DOMAIN, 302));
   }
+});
 
+async function handleJSONRequest(request) {
+  console.debug('Fetching photos.json');
   const cache = await caches.open(CACHE_NAME);
+  const cachedJSON = await cache.match(request);
 
-  if (imageMatch) {
-    return handleImageRequest(cache, request);
+  if (cachedJSON) {
+    console.debug('Returning cached photos.json');
+    return cachedJSON;
   }
 
-  if (url.pathname === "/update-cache") {
-    await cacheRandomImages(cache, request);
-    return new Response("Cache updated", {
-      status: 200,
-      headers: { "Content-Type": "text/plain" },
+  console.debug('No cached photos.json, fetching from Flickr API');
+  const allPhotos = await fetchJSONFromFlickr();
+
+  if (!allPhotos.length) {
+    console.debug('No photos available');
+    return new Response('[]', {
+      headers: {
+        'Content-Type': 'application/json',
+        'Cache-Control': `max-age=${CACHE_EXPIRATION}`
+      }
     });
   }
 
-  return Response.redirect(REDIRECT_DOMAIN, 302);
-}
+  // Randomly select NUM_IMAGES URLs
+  const selectedPhotos = shuffleArray(allPhotos).slice(0, NUM_IMAGES);
 
-async function handleImageRequest(cache, request) {
-  const response = await cache.match(request);
-
-  if (response) {
-    return response;
-  }
-
-  await cacheRandomImages(cache, request);
-  const cachedResponse = await cache.match(request);
-
-  return (
-    cachedResponse ||
-    new Response("Image not found", {
-      status: 404,
-      headers: { "Content-Type": "text/plain" },
-    })
-  );
-}
-
-async function fetchPhotosFromFlickr() {
-  const params = new URLSearchParams({
-    method: "flickr.photosets.getPhotos",
-    api_key: FLICKR_API_KEY,
-    photoset_id: FLICKR_PHOTOSET_ID,
-    format: "json",
-    nojsoncallback: "1",
-    extras: "url_l",
+  const response = new Response(JSON.stringify(selectedPhotos), {
+    headers: {
+      'Content-Type': 'application/json',
+      'Cache-Control': `max-age=${CACHE_EXPIRATION}`
+    }
   });
 
+  await cache.put(request, response.clone());
+  console.debug('Cached and returning fresh photos.json');
+  return response;
+}
+
+async function handleRequest(request, imageNumber) {
+  console.debug('Handling request:', { url: request.url, imageNumber });
+  if (imageNumber <= 0 || imageNumber > NUM_IMAGES) {
+    console.debug('Image number out of range:', { imageNumber, max: NUM_IMAGES });
+    return Response.redirect(REDIRECT_DOMAIN, 302);
+  }
+
+  const cache = await caches.open(CACHE_NAME);
+  const cachedResponse = await cache.match(request);
+
+  if (cachedResponse) {
+    console.debug('Cache hit:', { url: request.url, status: cachedResponse.status });
+    return cachedResponse;
+  }
+
+  // Get photos from cache first
+  const photosRequest = new Request(`${new URL(request.url).origin}/photos.json`);
+  let photoUrls;
+
+  const cachedPhotos = await cache.match(photosRequest);
+  
+  if (cachedPhotos) {
+    photoUrls = await cachedPhotos.json();
+  } else {
+    console.debug('photos.json not found in cache, generating...');
+    photoUrls = await handleJSONRequest(photosRequest).then(response => response.json());
+  }
+
+  if (!photoUrls.length || !photoUrls[imageNumber - 1]) {
+    console.debug('Invalid or missing photo URL, redirecting');
+    return Response.redirect(REDIRECT_DOMAIN, 302);
+  }
+
+  return fetchAndCacheImage(request, photoUrls[imageNumber - 1], imageNumber);
+}
+
+async function fetchJSONFromFlickr() {
+  console.debug('Fetching photos from Flickr API');
+  
+  const apiUrl = `https://api.flickr.com/services/rest/?method=flickr.photosets.getPhotos&api_key=${FLICKR_API_KEY}&photoset_id=${FLICKR_PHOTOSET_ID}&format=json&nojsoncallback=1&extras=url_l`;
+
   try {
-    const response = await fetch(
-      `https://api.flickr.com/services/rest/?${params}`
-    );
+    const response = await fetch(apiUrl);
     const data = await response.json();
-    return data.stat === "ok" ? data.photoset.photo : [];
-  } catch {
+
+    if (data.stat === 'ok') {
+      const photoUrls = data.photoset.photo
+        .filter(photo => photo.url_l)
+        .map(photo => photo.url_l);
+
+      console.debug('Flickr API response:', { totalPhotos: data.photoset.photo.length, validPhotos: photoUrls.length });
+      return photoUrls;
+    }
+    
+    console.error('Flickr API error:', data);
+    return [];
+    
+  } catch (error) {
+    console.error('Error fetching from Flickr API:', error);
     return [];
   }
 }
 
-async function cacheRandomImages(cache, originalRequest) {
-  const photos = await fetchPhotosFromFlickr();
-  const baseUrl = new URL(originalRequest.url).origin;
-  const randomPhotos = photos
-    .sort(() => Math.random() - 0.5)
-    .slice(0, NUM_IMAGES)
-    .filter((photo) => photo?.url_l);
+async function fetchAndCacheImage(request, imageUrl, imageNumber) {
+  console.debug('Fetching and caching image:', imageUrl);
 
-  await Promise.all(
-    randomPhotos.map(async (photo, i) => {
-      const imageRequest = new Request(`${baseUrl}/${i + 1}.jpg`);
-      const imageResponse = await fetch(photo.url_l);
+  const cache = await caches.open(CACHE_NAME);
+  
+  try {
+    const imageResponse = await fetch(imageUrl, { 
+      'Referer': REDIRECT_DOMAIN
+    });
 
-      const cachedResponse = new Response(imageResponse.body, {
-        headers: {
-          ...imageResponse.headers,
-          "Cache-Control": `public, max-age=${CACHE_EXPIRATION}`,
-          "Content-Type": "image/jpeg",
-        },
+    if (!imageResponse.ok) {
+      console.debug('Image cache failed, redirecting to Flickr', {
+        requestUrl: imageResponse.url,
+        status: imageResponse.status,
+        statusText: imageResponse.statusText
       });
+      return Response.redirect(imageUrl, 302);
+    }
 
-      await cache.put(imageRequest, cachedResponse);
-    })
-  );
+    const response = new Response(imageResponse.body, {
+      headers: new Headers({
+        ...Object.fromEntries(imageResponse.headers),
+        'Cache-Control': `max-age=${CACHE_EXPIRATION}`
+      })
+    });
+
+    await cache.put(request, response.clone());
+    console.debug('Successfully cached image:', request.url);
+    
+    return response;
+    
+  } catch (error) {
+    console.error('Error fetching/caching image, redirecting to fallback:', error);
+    return Response.redirect(`${REDIRECT_DOMAIN}/${imageNumber}.jpg`, 302);
+  }
+}
+
+// Utility function to shuffle an array
+function shuffleArray(array) {
+  for (let i = array.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [array[i], array[j]] = [array[j], array[i]];
+  }
+  return array;
 }

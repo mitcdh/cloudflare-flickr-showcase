@@ -59,64 +59,63 @@ async function handleJSONRequest(request) {
 
 async function handleRequest(request, imageNumber) {
   console.debug('Handling request:', { url: request.url, imageNumber });
+  
   if (imageNumber <= 0 || imageNumber > NUM_IMAGES) {
-    console.debug('Image number out of range:', { imageNumber, max: NUM_IMAGES });
-    return Response.redirect(REDIRECT_DOMAIN, 302);
+      console.debug('Image number out of range:', { imageNumber, max: NUM_IMAGES });
+      return Response.redirect(REDIRECT_DOMAIN, 302);
   }
 
   const cache = await caches.open(CACHE_NAME);
   const cachedResponse = await cache.match(request);
 
   if (cachedResponse) {
-    console.debug('Cache hit:', { url: request.url, status: cachedResponse.status });
-    return cachedResponse;
+      console.debug('Cache hit:', { url: request.url, status: cachedResponse.status });
+      return cachedResponse;
   }
 
-  // Get photos from cache first
   const photosRequest = new Request(`${new URL(request.url).origin}/photos.json`);
-  let photoUrls;
+  const photoResponse = await handleJSONRequest(photosRequest);
+  const photos = await photoResponse.json();
 
-  const cachedPhotos = await cache.match(photosRequest);
-  
-  if (cachedPhotos) {
-    photoUrls = await cachedPhotos.json();
-  } else {
-    console.debug('photos.json not found in cache, generating...');
-    photoUrls = await handleJSONRequest(photosRequest).then(response => response.json());
+  if (!photos.length || !photos[imageNumber - 1]) {
+      console.debug('Invalid or missing photo URL, redirecting to fallback');
+      return Response.redirect(`${REDIRECT_DOMAIN}/${imageNumber}.jpg`, 302);
   }
 
-  if (!photoUrls.length || !photoUrls[imageNumber - 1]) {
-    console.debug('Invalid or missing photo URL, redirecting');
-    return Response.redirect(REDIRECT_DOMAIN, 302);
-  }
-
-  return fetchAndCacheImage(request, photoUrls[imageNumber - 1], imageNumber);
+  return fetchAndCacheImage(request, photos[imageNumber - 1].url, imageNumber);
 }
 
 async function fetchJSONFromFlickr() {
   console.debug('Fetching photos from Flickr API');
   
-  const apiUrl = `https://api.flickr.com/services/rest/?method=flickr.photosets.getPhotos&api_key=${FLICKR_API_KEY}&photoset_id=${FLICKR_PHOTOSET_ID}&format=json&nojsoncallback=1&extras=url_l`;
+  const apiUrl = `https://api.flickr.com/services/rest/?method=flickr.photosets.getPhotos&api_key=${FLICKR_API_KEY}&photoset_id=${FLICKR_PHOTOSET_ID}&format=json&nojsoncallback=1&extras=url_l,description,title`;
 
   try {
-    const response = await fetch(apiUrl);
-    const data = await response.json();
+      const response = await fetch(apiUrl);
+      const data = await response.json();
 
-    if (data.stat === 'ok') {
-      const photoUrls = data.photoset.photo
-        .filter(photo => photo.url_l)
-        .map(photo => photo.url_l);
+      if (data.stat === 'ok') {
+          const photos = data.photoset.photo
+              .filter(photo => photo.url_l)
+              .map(photo => ({
+                  url: photo.url_l,
+                  title: photo.title,
+                  description: photo.description._content || '',
+              }));
 
-      console.debug('Flickr API response:', { totalPhotos: data.photoset.photo.length, validPhotos: photoUrls.length });
-      return photoUrls;
-    }
-    
-    console.error('Flickr API error:', data);
-    return [];
-    
+          console.debug('Flickr API response:', { 
+              totalPhotos: data.photoset.photo.length, 
+              validPhotos: photos.length 
+          });
+          return photos;
+      }
+      
+      console.error('Flickr API error:', data);
+      return [];
+      
   } catch (error) {
-    console.error('Error fetching from Flickr API:', error);
-    return [];
+      console.error('Error fetching from Flickr API:', error);
+      return [];
   }
 }
 
@@ -126,34 +125,34 @@ async function fetchAndCacheImage(request, imageUrl, imageNumber) {
   const cache = await caches.open(CACHE_NAME);
   
   try {
-    const imageResponse = await fetch(imageUrl, { 
-      'Referer': REDIRECT_DOMAIN
-    });
-
-    if (!imageResponse.ok) {
-      console.debug('Image cache failed, redirecting to Flickr', {
-        requestUrl: imageResponse.url,
-        status: imageResponse.status,
-        statusText: imageResponse.statusText
+      const imageResponse = await fetch(imageUrl, { 
+          'Referer': REDIRECT_DOMAIN
       });
-      return Response.redirect(imageUrl, 302);
-    }
 
-    const response = new Response(imageResponse.body, {
-      headers: new Headers({
-        ...Object.fromEntries(imageResponse.headers),
-        'Cache-Control': `max-age=${CACHE_EXPIRATION}`
-      })
-    });
+      if (!imageResponse.ok) {
+          console.debug('Image cache failed, redirecting to Flickr', {
+              requestUrl: imageResponse.url,
+              status: imageResponse.status,
+              statusText: imageResponse.statusText
+          });
+          return Response.redirect(imageUrl, 302);
+      }
 
-    await cache.put(request, response.clone());
-    console.debug('Successfully cached image:', request.url);
-    
-    return response;
-    
+      const response = new Response(imageResponse.body, {
+          headers: new Headers({
+              ...Object.fromEntries(imageResponse.headers),
+              'Cache-Control': `max-age=${CACHE_EXPIRATION}`
+          })
+      });
+
+      await cache.put(request, response.clone());
+      console.debug('Successfully cached image:', request.url);
+      
+      return response;
+      
   } catch (error) {
-    console.error('Error fetching/caching image, redirecting to fallback:', error);
-    return Response.redirect(`${REDIRECT_DOMAIN}/${imageNumber}.jpg`, 302);
+      console.error('Error fetching/caching image, redirecting to fallback:', error);
+      return Response.redirect(`${REDIRECT_DOMAIN}/${imageNumber}.jpg`, 302);
   }
 }
 
